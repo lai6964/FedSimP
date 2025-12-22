@@ -51,7 +51,7 @@ def cluster_protos_by_Truepredict(protos_list, using_true_samples_only=True):
     prototypes, variances, counts = compute_mean_and_variance(protos, probs)
     return prototypes, variances, counts
 
-def compute_global_protos(uploaded_protos, uploaded_vars, uploaded_nums):
+def compute_global_protos(uploaded_protos, uploaded_vars, uploaded_nums, outbyclass=False):
     """
     计算全局均值和方差
     使用加权平均，权重为每个客户端在每个类别上的样本数量
@@ -65,6 +65,9 @@ def compute_global_protos(uploaded_protos, uploaded_vars, uploaded_nums):
     for protos in uploaded_protos:
         all_classes.update(protos.keys())
 
+    protos_data_by_class = defaultdict(list)
+    vars_data_bv_class = defaultdict(list)
+    nums_data_bv_class = defaultdict(list)
     # 对每个类别分别计算全局均值和方差
     for class_id in all_classes:
         # 收集所有客户端中该类别的信息
@@ -81,7 +84,9 @@ def compute_global_protos(uploaded_protos, uploaded_vars, uploaded_nums):
         if len(class_means)==0:  # 如果没有客户端有这个类别
             print("error when cluster global protos for class_id {}".format(class_id))
             continue
-
+        protos_data_by_class[class_id] = class_means
+        vars_data_bv_class[class_id] = class_variances
+        nums_data_bv_class[class_id] = class_weights
         # 转换为张量
         means_tensor = torch.stack(class_means)
         variances_tensor = torch.stack(class_variances)
@@ -112,5 +117,6 @@ def compute_global_protos(uploaded_protos, uploaded_vars, uploaded_nums):
         # 存储结果
         global_protos[class_id] = global_mean
         global_vars[class_id] = global_variance
-
+    if outbyclass:
+        return global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class
     return global_protos, global_vars

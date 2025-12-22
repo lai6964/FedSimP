@@ -1,3 +1,4 @@
+from pyexpat import features
 from torchvision import datasets
 from torchvision.transforms import ToTensor, transforms
 from options import args_parser
@@ -38,8 +39,8 @@ class Global(object):
         self.syn_model = ResNet_cifar(resnet_size=8, scaling=4,
                                       save_activations=False, group_norm_num_groups=None,
                                       freeze_bn=False, freeze_bn_affine=False, num_classes=args.num_classes).to(device)
-        self.feature_net = nn.Linear(256, 10).to(args.device)
         self.batch_size_local_training = args.batch_size_local_training
+        self.criterion = CrossEntropyLoss().to(args.device)
 
     def initialize_for_model_fusion(self, list_dicts_local_params: list, list_nums_local_data: list):
         # fedavg
@@ -52,8 +53,35 @@ class Global(object):
             fedavg_global_params[name_param] = value_global_param
         return fedavg_global_params
 
-    def update_feature_syn(self, args):
+    def update_feature_syn(self, global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class):
+        features, labels = [], []
+        for class_id in global_protos.keys():
+            nums = nums_data_bv_class[class_id]
+            ratios = [n/sum(nums) for n in nums]
+            nums = [int(100*r)+1 for r in ratios]
 
+            global_mean = global_protos[class_id]
+            global_variance = global_vars[class_id]
+            # global_samples = global_mean.unsqueeze(0) + torch.randn(
+            #     sum(nums), global_mean.size(0), device=self.device
+            # ) * torch.sqrt(global_variance).unsqueeze(0)
+
+            for i,n in enumerate(nums):
+                local_mean = protos_data_by_class[class_id][i]
+                local_variance = vars_data_bv_class[class_id][i]
+                local_samples = local_mean.unsqueeze(0) + torch.randn(
+                    n, local_mean.size(0), device=self.device
+                ) * torch.sqrt(local_variance).unsqueeze(0)
+
+                global_samples = global_mean.unsqueeze(0) + torch.randn(
+                    n, global_mean.size(0), device=self.device
+                ) * torch.sqrt(global_variance).unsqueeze(0)
+
+                combined_samples = 0.5 * local_samples + 0.5 * global_samples
+                features.append(combined_samples)
+                labels.append(torch.full((n,), class_id, dtype=torch.long, device=self.device))
+        self.feature_syn = torch.cat(features, dim=0)
+        self.label_syn = torch.cat(labels, dim=0)
         return None
 
     def feature_re_train(self):
@@ -242,8 +270,15 @@ def FedProto(args):
             list_proto_nums_local_data.append(samples_T_num)
         # aggregating local models with FedAvg
         fedavg_params = global_model.initialize_for_model_fusion(list_dicts_local_params, list_nums_local_data)
-        global_protos, global_vars = compute_global_protos(list_proto_features_local_data,list_proto_vars_local_data,list_proto_nums_local_data)
+        global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class = compute_global_protos(list_proto_features_local_data,list_proto_vars_local_data,list_proto_nums_local_data, True)
+        global_model.update_feature_syn(global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class)
         # global eval
+        feature_net_params = global_model.feature_re_train()
+        for name_param in reversed(fedavg_params):
+            if name_param == 'classifier.bias':
+                fedavg_params[name_param] = feature_net_params['bias']
+            if name_param == 'classifier.weight':
+                fedavg_params[name_param] = feature_net_params['weight']
         one_re_train_acc = global_model.global_eval(fedavg_params, data_global_test, args.batch_size_test)
         re_trained_acc.append(one_re_train_acc)
         global_model.syn_model.load_state_dict(copy.deepcopy(fedavg_params))
@@ -264,6 +299,7 @@ if __name__ == '__main__':
     args = args_parser()
     args.lamda_proto = 1.0
     args.dsa = False
+    args.num_online_clients = 20
     FedProto(args)
 
 
