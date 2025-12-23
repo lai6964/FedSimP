@@ -18,10 +18,7 @@ import random
 import torch.nn as nn
 import time
 from Dataset.param_aug import DiffAugment
-from utils import compute_global_protos, _get_prototypes_by_labels, compute_mean_and_variance, cluster_protos_by_Truepredict, compute_global_protos, get_protos
-from collections import defaultdict
 from utils_getdata import my_get_data
-
 
 class Global(object):
     def __init__(self,
@@ -31,10 +28,10 @@ class Global(object):
                  num_of_feature):
         self.device = device
         self.num_classes = num_classes
-        self.num_of_feature = num_of_feature
         self.syn_model = ResNet_cifar(resnet_size=8, scaling=4,
                                       save_activations=False, group_norm_num_groups=None,
                                       freeze_bn=False, freeze_bn_affine=False, num_classes=args.num_classes).to(device)
+        self.feature_net = nn.Linear(512, self.num_classes).to(args.device)
 
     def initialize_for_model_fusion(self, list_dicts_local_params: list, list_nums_local_data: list):
         # fedavg
@@ -78,17 +75,17 @@ class Local(object):
         self.class_compose = class_list
 
         self.criterion = CrossEntropyLoss().to(args.device)
-        self.loss_mse = nn.MSELoss().to(args.device)
+
         self.local_model = ResNet_cifar(resnet_size=8, scaling=4,
                                         save_activations=False, group_norm_num_groups=None,
-                                        freeze_bn=False, freeze_bn_affine=False,
-                                        num_classes=args.num_classes).to(args.device)
+                                        freeze_bn=False, freeze_bn_affine=False, num_classes=args.num_classes).to(
+            args.device)
         self.optimizer = SGD(self.local_model.parameters(), lr=args.lr_local_training)
-        self.transform_train = transforms.Compose([
+
+    def local_train(self, args, global_params):
+        transform_train = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip()])
-
-    def local_train(self, args, global_params, global_protos):
 
         self.local_model.load_state_dict(global_params)
         self.local_model.train()
@@ -99,22 +96,17 @@ class Local(object):
             for data_batch in data_loader:
                 images, labels = data_batch
                 images, labels = images.to(self.device), labels.to(self.device)
-                images = self.transform_train(images)
-                features, outputs = self.local_model(images)
+                images = transform_train(images)
+                _, outputs = self.local_model(images)
                 loss = self.criterion(outputs, labels)
-
-
-                if global_protos is not None:
-                    proto_teacher = _get_prototypes_by_labels(features, labels, global_protos)
-                    loss += self.loss_mse(features, proto_teacher) * args.lamda_proto
-
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
         return self.local_model.state_dict()
 
 
-def FedProto(args):
+def FedAvg(args):
+    # args = args_parser()
     print(
         'imb_factor:{ib}, non_iid:{non_iid}\n'
         'lr_net:{lr_net}, lr_feature:{lr_feature}, num_of_feature:{num_of_feature}\n '
@@ -127,7 +119,6 @@ def FedProto(args):
             match_epoch=args.match_epoch,
             crt_epoch=args.crt_epoch))
     random_state = np.random.RandomState(args.seed)
-    # Load data
     list_client2indices, original_dict_per_client, data_global_test, indices2data = my_get_data(args)
     global_model = Global(num_classes=args.num_classes,
                           device=args.device,
@@ -135,13 +126,20 @@ def FedProto(args):
                           num_of_feature=args.num_of_feature)
     total_clients = list(range(args.num_clients))
     re_trained_acc = []
-    global_protos = None
+    temp_model = nn.Linear(512, args.num_classes).to(args.device)
+    syn_params = temp_model.state_dict()
     for r in tqdm(range(1, args.num_rounds+1), desc='server-training'):
         global_params = global_model.download_params()
+        syn_feature_params = copy.deepcopy(global_params)
+        for name_param in reversed(syn_feature_params):
+            if name_param == 'classifier.bias':
+                syn_feature_params[name_param] = syn_params['bias']
+            if name_param == 'classifier.weight':
+                syn_feature_params[name_param] = syn_params['weight']
+                break
         online_clients = random_state.choice(total_clients, args.num_online_clients, replace=False)
         list_dicts_local_params = []
         list_nums_local_data = []
-        list_proto_features_local_data, list_proto_vars_local_data, list_proto_nums_local_data = [], [], []
         # local training
         for client in online_clients:
             indices2data.load(list_client2indices[client])
@@ -150,24 +148,17 @@ def FedProto(args):
             local_model = Local(data_client=data_client,
                                 class_list=original_dict_per_client[client])
             # local update
-            local_params = local_model.local_train(args, copy.deepcopy(global_params),global_protos)
+            local_params = local_model.local_train(args, copy.deepcopy(global_params))
             list_dicts_local_params.append(copy.deepcopy(local_params))
-
-            local_protos = get_protos(local_model.local_model, args.device, data_client, args.batch_size_local_training)
-            protos, vars, samples_T_num = cluster_protos_by_Truepredict(local_protos, False)
-            list_proto_features_local_data.append(copy.deepcopy(protos))
-            list_proto_vars_local_data.append(copy.deepcopy(vars))
-            list_proto_nums_local_data.append(samples_T_num)
         # aggregating local models with FedAvg
         fedavg_params = global_model.initialize_for_model_fusion(list_dicts_local_params, list_nums_local_data)
-        global_protos, global_vars = compute_global_protos(list_proto_features_local_data,list_proto_vars_local_data,list_proto_nums_local_data)
         # global eval
         one_re_train_acc = global_model.global_eval(fedavg_params, data_global_test, args.batch_size_test)
         re_trained_acc.append(one_re_train_acc)
         global_model.syn_model.load_state_dict(copy.deepcopy(fedavg_params))
         if r % 10 == 0:
             print(re_trained_acc)
-    with open("results/{}_{}_FedProto.txt".format(args.dataset_name, int(1.0/args.imb_factor)),"w") as f:
+    with open("results/{}_{}_FedAvg.txt".format(args.dataset_name, int(1.0/args.imb_factor)),"w") as f:
         for i, acc in enumerate(re_trained_acc):
             f.write("epoch_"+str(i)+":"+str(acc)+"\n")
     print(re_trained_acc)
@@ -180,7 +171,7 @@ if __name__ == '__main__':
     random.seed(7)  # random and transforms
     torch.backends.cudnn.deterministic = True  # cudnn
     args = args_parser()
-    args.lamda_proto = 1.0
-    FedProto(args)
+    args.dsa = False
+    FedAvg(args)
 
 

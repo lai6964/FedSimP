@@ -37,6 +37,8 @@ class Global(object):
                                        requires_grad=True, device=args.device)
         self.label_syn = torch.tensor([np.ones(self.num_of_feature, dtype=int) * i for i in range(args.num_classes)], dtype=torch.long,
                                       requires_grad=False, device=args.device).view(-1)  # [0,0,0, 1,1,1, ..., 9,9,9]
+        self.optimizer_feature = SGD([self.feature_syn, ], lr=args.lr_feature)  # optimizer_img for synthetic data
+        self.feature_net = nn.Linear(512, self.num_classes).to(args.device)
         self.syn_model = ResNet_cifar(resnet_size=8, scaling=4,
                                       save_activations=False, group_norm_num_groups=None,
                                       freeze_bn=False, freeze_bn_affine=False, num_classes=args.num_classes).to(device)
@@ -54,36 +56,51 @@ class Global(object):
             fedavg_global_params[name_param] = value_global_param
         return fedavg_global_params
 
-    def update_feature_syn(self, global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class):
-        features, labels = [], []
-        for class_id in global_protos.keys():
-            nums = nums_data_bv_class[class_id]
-            ratios = [n/sum(nums) for n in nums]
-            nums = [int(100*r)+1 for r in ratios]
+    def update_feature_syn(self, args, global_params, list_clients_gradient):
+        feature_net_params = self.feature_net.state_dict()
+        for name_param in reversed(global_params):
+            if name_param == 'classifier.bias':
+                feature_net_params['bias'] = global_params[name_param]
+            if name_param == 'classifier.weight':
+                feature_net_params['weight'] = global_params[name_param]
+                break
+        self.feature_net.load_state_dict(feature_net_params)
+        self.feature_net.train()
+        net_global_parameters = list(self.feature_net.parameters())
+        gw_real_all = {class_index: [] for class_index in range(self.num_classes)}
+        for gradient_one in list_clients_gradient:
+            for class_num, gradient in gradient_one.items():
+                gw_real_all[class_num].append(gradient)
+        gw_real_avg = {class_index: [] for class_index in range(args.num_classes)}
+        # aggregate the real feature gradients
+        for i in range(args.num_classes):
+            gw_real_temp = []
+            list_one_class_client_gradient = gw_real_all[i]
 
-            global_mean = global_protos[class_id]
-            global_variance = global_vars[class_id]
-            # global_samples = global_mean.unsqueeze(0) + torch.randn(
-            #     sum(nums), global_mean.size(0), device=self.device
-            # ) * torch.sqrt(global_variance).unsqueeze(0)
-
-            for i,n in enumerate(nums):
-                local_mean = protos_data_by_class[class_id][i]
-                local_variance = vars_data_bv_class[class_id][i]
-                local_samples = local_mean.unsqueeze(0) + torch.randn(
-                    n, local_mean.size(0), device=self.device
-                ) * torch.sqrt(local_variance).unsqueeze(0)
-
-                global_samples = global_mean.unsqueeze(0) + torch.randn(
-                    n, global_mean.size(0), device=self.device
-                ) * torch.sqrt(global_variance).unsqueeze(0)
-
-                combined_samples = 0.5 * local_samples + 0.5 * global_samples
-                features.append(combined_samples)
-                labels.append(torch.full((n,), class_id, dtype=torch.long, device=self.device))
-        self.feature_syn = torch.cat(features, dim=0)
-        self.label_syn = torch.cat(labels, dim=0)
-        return None
+            if len(list_one_class_client_gradient) != 0:
+                weight_temp = 1.0 / len(list_one_class_client_gradient)
+                for name_param in range(2):
+                    list_values_param = []
+                    for one_gradient in list_one_class_client_gradient:
+                        list_values_param.append(one_gradient[name_param] * weight_temp)
+                    value_global_param = sum(list_values_param)
+                    gw_real_temp.append(value_global_param)
+                gw_real_avg[i] = gw_real_temp
+        # update the federated features.
+        for ep in range(args.match_epoch):
+            loss_feature = torch.tensor(0.0).to(args.device)
+            for c in range(args.num_classes):
+                if len(gw_real_avg[c]) != 0:
+                    feature_syn = self.feature_syn[c * self.num_of_feature:(c + 1) * self.num_of_feature].reshape((self.num_of_feature, 512))
+                    lab_syn = torch.ones((self.num_of_feature,), device=args.device, dtype=torch.long) * c
+                    output_syn = self.feature_net(feature_syn)
+                    loss_syn = self.criterion(output_syn, lab_syn)
+                    # compute the federated feature gradients of class c
+                    gw_syn = torch.autograd.grad(loss_syn, net_global_parameters, create_graph=True)
+                    loss_feature += match_loss(gw_syn, gw_real_avg[c], args)
+            self.optimizer_feature.zero_grad()
+            loss_feature.backward()
+            self.optimizer_feature.step()
 
     def feature_re_train(self):
         feature_syn_train_ft = copy.deepcopy(self.feature_syn.detach())
@@ -148,6 +165,64 @@ class Local(object):
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip()])
 
+    def compute_gradient(self, global_params, args):
+        # compute C^k
+        list_class, per_class_compose = get_class_num(self.class_compose)  # class组成
+
+        images_all = []
+        labels_all = []
+        indices_class = {class_index: [] for class_index in list_class}
+
+        images_all = [unsqueeze(self.data_client[i][0], dim=0) for i in range(len(self.data_client))]
+        labels_all = [self.data_client[i][1] for i in range(len(self.data_client))]
+        for i, lab in enumerate(labels_all):
+            indices_class[lab].append(i)
+        images_all = torch.cat(images_all, dim=0).to(args.device)
+        labels_all = torch.tensor(labels_all, dtype=torch.long, device=args.device)
+
+        def get_images(c, n):  # get random n images from class c
+            idx_shuffle = np.random.permutation(indices_class[c])[:n]
+            return images_all[idx_shuffle]
+
+        self.local_model.load_state_dict(global_params)
+
+        self.local_model.eval()
+        self.local_model.classifier.train()
+        net_parameters = list(self.local_model.classifier.parameters())
+        criterion = CrossEntropyLoss().to(args.device)
+        # gradients of all classes
+        truth_gradient_all = {index: [] for index in list_class}
+        truth_gradient_avg = {index: [] for index in list_class}
+
+        # choose to repeat 10 times
+        for num_compute in range(10):
+            for c, num in zip(list_class, per_class_compose):
+                img_real = get_images(c, args.batch_real)
+                # transform
+                if args.dsa:
+                    seed = int(time.time() * 1000) % 100000
+                    img_real = DiffAugment(img_real, args.dsa_strategy, seed=seed, param=args.dsa_param)
+                lab_real = torch.ones((img_real.shape[0],), device=args.device, dtype=torch.long) * c
+                feature_real, output_real = self.local_model(img_real)
+                loss_real = criterion(output_real, lab_real)
+                # compute the real feature gradients of class c
+                gw_real = torch.autograd.grad(loss_real, net_parameters)
+                gw_real = list((_.detach().clone() for _ in gw_real))
+                truth_gradient_all[c].append(gw_real)
+        for i in list_class:
+            gw_real_temp = []
+            gradient_all = truth_gradient_all[i]
+            weight = 1.0 / len(gradient_all)
+            for name_param in range(len(gradient_all[0])):
+                list_values_param = []
+                for client_one in gradient_all:
+                    list_values_param.append(client_one[name_param] * weight)
+                value_global_param = sum(list_values_param)
+                gw_real_temp.append(value_global_param)
+            # the real feature gradients of all classes
+            truth_gradient_avg[i] = gw_real_temp
+        return truth_gradient_avg
+
     def local_train(self, args, global_params, global_protos):
 
         self.local_model.load_state_dict(global_params)
@@ -163,7 +238,6 @@ class Local(object):
                 features, outputs = self.local_model(images)
                 loss = self.criterion(outputs, labels)
 
-
                 if global_protos is not None:
                     proto_teacher = _get_prototypes_by_labels(features, labels, global_protos)
                     loss += self.loss_mse(features, proto_teacher) * args.lamda_proto
@@ -174,7 +248,7 @@ class Local(object):
         return self.local_model.state_dict()
 
 
-def FedGAdp(args):
+def FedCReProto(args):
     # args = args_parser()
     print(
         'imb_factor:{ib}, non_iid:{non_iid}\n'
@@ -187,7 +261,6 @@ def FedGAdp(args):
             num_of_feature=args.num_of_feature,
             match_epoch=args.match_epoch,
             crt_epoch=args.crt_epoch))
-    clip_protos = torch.load("prototypes_"+args.dataset_name+".pth")
     random_state = np.random.RandomState(args.seed)
     # Load data
     list_client2indices, original_dict_per_client, data_global_test, indices2data = my_get_data(args)
@@ -198,11 +271,20 @@ def FedGAdp(args):
     total_clients = list(range(args.num_clients))
     re_trained_acc = []
     global_protos = None
+    temp_model = nn.Linear(512, args.num_classes).to(args.device)
+    syn_params = temp_model.state_dict()
     for r in tqdm(range(1, args.num_rounds+1), desc='server-training'):
         global_params = global_model.download_params()
+        syn_feature_params = copy.deepcopy(global_params)
+        for name_param in reversed(syn_feature_params):
+            if name_param == 'classifier.bias':
+                syn_feature_params[name_param] = syn_params['bias']
+            if name_param == 'classifier.weight':
+                syn_feature_params[name_param] = syn_params['weight']
         online_clients = random_state.choice(total_clients, args.num_online_clients, replace=False)
         list_dicts_local_params = []
         list_nums_local_data = []
+        list_clients_gradient = []
         list_proto_features_local_data, list_proto_vars_local_data, list_proto_nums_local_data = [], [], []
         # local training
         for client in online_clients:
@@ -211,6 +293,9 @@ def FedGAdp(args):
             list_nums_local_data.append(len(data_client))
             local_model = Local(data_client=data_client,
                                 class_list=original_dict_per_client[client])
+            # compute the real feature gradients in local data
+            truth_gradient = local_model.compute_gradient(copy.deepcopy(syn_feature_params), args)
+            list_clients_gradient.append(copy.deepcopy(truth_gradient))
             # local update
             local_params = local_model.local_train(args, copy.deepcopy(global_params),global_protos)
             list_dicts_local_params.append(copy.deepcopy(local_params))
@@ -223,12 +308,7 @@ def FedGAdp(args):
         # aggregating local models with FedAvg
         fedavg_params = global_model.initialize_for_model_fusion(list_dicts_local_params, list_nums_local_data)
         global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class = compute_global_protos(list_proto_features_local_data,list_proto_vars_local_data,list_proto_nums_local_data, True)
-
-        ratio = (r-1)/args.num_rounds
-        for i in range(args.num_classes):
-            global_protos[i] = global_protos[i]*ratio+clip_protos[i]*(1-ratio)
-
-        global_model.update_feature_syn(global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class)
+        global_model.update_feature_syn(args, copy.deepcopy(syn_feature_params), list_clients_gradient)
         # global eval
         feature_net_params = global_model.feature_re_train()
         for name_param in reversed(fedavg_params):
@@ -241,7 +321,7 @@ def FedGAdp(args):
         global_model.syn_model.load_state_dict(copy.deepcopy(fedavg_params))
         if r % 10 == 0:
             print(re_trained_acc)
-    with open("{}_{}_FedGAdp.txt".format(args.dataset_name, int(1.0/args.imb_factor)),"w") as f:
+    with open("results/{}_{}_FedCReProto.txt".format(args.dataset_name, int(1.0/args.imb_factor)),"w") as f:
         for i, acc in enumerate(re_trained_acc):
             f.write("epoch_"+str(i)+":"+str(acc)+"\n")
     print(re_trained_acc)
@@ -255,6 +335,4 @@ if __name__ == '__main__':
     torch.backends.cudnn.deterministic = True  # cudnn
     args = args_parser()
     args.lamda_proto = 1.0
-    FedGAdp(args)
-
-
+    FedCReProto(args)

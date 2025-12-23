@@ -7,8 +7,8 @@ def args_parser():
     parser = argparse.ArgumentParser()
     path_dir = os.path.dirname(__file__)
     parser.add_argument('--dataset_name', type=str, default="Cifar10")
-    parser.add_argument('--path_cifar10', type=str, default=r"D:\PycharmProjects\Dataset")
-    parser.add_argument('--path_cifar100', type=str, default=r"D:\PycharmProjects\Dataset")
+    parser.add_argument('--path_cifar10', type=str, default="data")
+    parser.add_argument('--path_cifar100', type=str, default="data")
     parser.add_argument('--num_classes', type=int, default=10)
     parser.add_argument('--num_clients', type=int, default=20)
     parser.add_argument('--num_online_clients', type=int, default=8)
@@ -41,9 +41,17 @@ def args_parser():
     args = parser.parse_args()
     args.dsa_param = ParamDiffAug()
     args.dsa = True if args.method == 'DSA' else False
+    args.dsa = False
     os.environ["CUDA_VISIBLE_DEVICES"] = args.device_id
 
     if args.device == "cuda" and not torch.cuda.is_available():
         print("\ncuda is not avaiable.\n")
         args.device = "cpu"
+
+    if args.dataset_name == "Cifar10":
+        args.num_classes = 10
+    elif args.dataset_name == "Cifar100":
+        args.num_classes = 100
+
+    args.num_online_clients = args.num_clients
     return args

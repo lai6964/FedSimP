@@ -1,5 +1,39 @@
 import torch
 from collections import defaultdict
+from torch.utils.data.dataloader import DataLoader
+
+def get_protos(local_model, device, data_client, batch_size_local_training):
+    protos = defaultdict(list)
+    trainloader = DataLoader(dataset=data_client,
+                             batch_size=batch_size_local_training,
+                             shuffle=True)
+    with torch.no_grad():
+        for x, y in trainloader:
+            x = x.to(device)
+            y = y.to(device)
+            # x = self.transform_train(x)
+            rep, output = local_model(x)
+
+            pred_probs = torch.softmax(output, dim=1)  # 所有类别的预测概率
+            pred_classes = torch.argmax(pred_probs, dim=1)  # 预测的类别
+            true_class_probs = pred_probs[torch.arange(len(y)), y]  # 真实类别的概率
+            pred_class_probs = torch.max(pred_probs, dim=1)[0]  # 预测类别的概率
+
+            for i, yy in enumerate(y):
+                y_c = yy.item()
+                pred_c = pred_classes[i].item()
+                protos[y_c].append({
+                    'true_class': y_c,  # 真实类别
+                    'pred_class': pred_c,  # 预测类别
+                    'true_class_prob': true_class_probs[i].item(),  # 真实类别的概率
+                    'pred_class_prob': pred_class_probs[i].item(),  # 预测类别的概率
+                    'is_correct': (y_c == pred_c),  # 预测是否正确
+                    # 'is_hard': (true_class_probs[i].item() < self.hard_thread),  # 是否困难样本
+                    'confidence': pred_class_probs[i].item(),  # 置信度（预测类别的概率）
+                    'feature': rep[i, :].detach().data,
+                    'all_probs': pred_probs[i, :].detach().data  # 所有类别的概率
+                })
+    return protos
 
 def _get_prototypes_by_labels(rep, labels, protos_dict):
     """根据标签获取对应的原型"""

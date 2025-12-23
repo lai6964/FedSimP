@@ -10,7 +10,7 @@ from torch import stack, max, eq, no_grad, tensor, unsqueeze, split
 from torch.optim import SGD
 from torch.nn import CrossEntropyLoss
 from torch.utils.data.dataloader import DataLoader
-from Model.Resnet8 import ResNet_cifar
+from Model.Resnet8_512 import ResNet_cifar
 from tqdm import tqdm
 import copy
 import torch
@@ -38,14 +38,14 @@ class Global(object):
         self.ft_medium = []
         self.ft_few = []
         self.num_of_feature = num_of_feature
-        self.feature_syn = torch.randn(size=(args.num_classes * self.num_of_feature, 256), dtype=torch.float, requires_grad=True, device=args.device)
+        self.feature_syn = torch.randn(size=(args.num_classes * self.num_of_feature, 512), dtype=torch.float, requires_grad=True, device=args.device)
         self.label_syn = torch.tensor([np.ones(self.num_of_feature, dtype=int) * i for i in range(args.num_classes)], dtype=torch.long, requires_grad=False, device=args.device).view(-1)  # [0,0,0, 1,1,1, ..., 9,9,9]
         self.optimizer_feature = SGD([self.feature_syn, ], lr=args.lr_feature)  # optimizer_img for synthetic data
         self.criterion = CrossEntropyLoss().to(args.device)
         self.syn_model = ResNet_cifar(resnet_size=8, scaling=4,
                                       save_activations=False, group_norm_num_groups=None,
                                       freeze_bn=False, freeze_bn_affine=False, num_classes=args.num_classes).to(device)
-        self.feature_net = nn.Linear(256, 10).to(args.device)
+        self.feature_net = nn.Linear(512, self.num_classes).to(args.device)
 
     def update_feature_syn(self, args, global_params, list_clients_gradient):
         feature_net_params = self.feature_net.state_dict()
@@ -82,7 +82,7 @@ class Global(object):
             loss_feature = torch.tensor(0.0).to(args.device)
             for c in range(args.num_classes):
                 if len(gw_real_avg[c]) != 0:
-                    feature_syn = self.feature_syn[c * self.num_of_feature:(c + 1) * self.num_of_feature].reshape((self.num_of_feature, 256))
+                    feature_syn = self.feature_syn[c * self.num_of_feature:(c + 1) * self.num_of_feature].reshape((self.num_of_feature, 512))
                     lab_syn = torch.ones((self.num_of_feature,), device=args.device, dtype=torch.long) * c
                     output_syn = self.feature_net(feature_syn)
                     loss_syn = self.criterion(output_syn, lab_syn)
@@ -97,7 +97,7 @@ class Global(object):
         feature_syn_train_ft = copy.deepcopy(self.feature_syn.detach())
         label_syn_train_ft = copy.deepcopy(self.label_syn.detach())
         dst_train_syn_ft = TensorDataset(feature_syn_train_ft, label_syn_train_ft)
-        ft_model = nn.Linear(256, 10).to(args.device)
+        ft_model = nn.Linear(512, self.num_classes).to(args.device)
         optimizer_ft_net = SGD(ft_model.parameters(), lr=args.lr_net)  # optimizer_img for synthetic data
         ft_model.train()
         for epoch in range(args.crt_epoch):
@@ -275,7 +275,7 @@ def CReFF(args):
                           num_of_feature=args.num_of_feature)
     total_clients = list(range(args.num_clients))
     re_trained_acc = []
-    temp_model = nn.Linear(256, 10).to(args.device)
+    temp_model = nn.Linear(512, args.num_classes).to(args.device)
     syn_params = temp_model.state_dict()
     for r in tqdm(range(1, args.num_rounds+1), desc='server-training'):
         global_params = global_model.download_params()
@@ -314,9 +314,9 @@ def CReFF(args):
         global_model.syn_model.load_state_dict(copy.deepcopy(fedavg_params))
         if r % 10 == 0:
             print(re_trained_acc)
-    with open("{}_{}_CReFF.txt".format(args.dataset_name, int(1.0/args.imb_factor)),"w") as f:
+    with open("results/{}_{}_CReFF.txt".format(args.dataset_name, int(1.0/args.imb_factor)),"w") as f:
         for i, acc in enumerate(re_trained_acc):
-            f.write("epoch_"+str(i)+":"+str(acc)+"/n")
+            f.write("epoch_"+str(i)+":"+str(acc)+"\n")
     print(re_trained_acc)
 
 
@@ -327,7 +327,6 @@ if __name__ == '__main__':
     random.seed(7)  # random and transforms
     torch.backends.cudnn.deterministic = True  # cudnn
     args = args_parser()
-    args.dsa = False
     CReFF(args)
 
 
