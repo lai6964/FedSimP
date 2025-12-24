@@ -15,8 +15,8 @@ def my_get_data(args):
         data_local_training = datasets.CIFAR10(args.path_cifar10, train=True, download=True, transform=transform_all)
         data_global_test = datasets.CIFAR10(args.path_cifar10, train=False, transform=transform_all)
     elif args.dataset_name == 'Cifar100':
-        data_local_training = datasets.CIFAR10(args.path_cifar100, train=True, download=True, transform=transform_all)
-        data_global_test = datasets.CIFAR10(args.path_cifar100, train=False, transform=transform_all)
+        data_local_training = datasets.CIFAR100(args.path_cifar100, train=True, download=True, transform=transform_all)
+        data_global_test = datasets.CIFAR100(args.path_cifar100, train=False, transform=transform_all)
     else:
         exit("no suit dataset as {}".format(args.dataset_name))
 

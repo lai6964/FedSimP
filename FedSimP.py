@@ -87,17 +87,46 @@ class Global(object):
                 labels.append(torch.full((n,), class_id, dtype=torch.long, device=self.device))
         self.feature_syn = torch.cat(features, dim=0)
         self.label_syn = torch.cat(labels, dim=0)
-        return None
-
-    def feature_re_train(self):
         feature_syn_train_ft = copy.deepcopy(self.feature_syn.detach())
         label_syn_train_ft = copy.deepcopy(self.label_syn.detach())
         dst_train_syn_ft = TensorDataset(feature_syn_train_ft, label_syn_train_ft)
+        return dst_train_syn_ft
+
+    def update_feature_syn2(self, global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class):
+        features, labels = [], []
+
+        feat_vars = []
+        for key, value in vars_data_bv_class.items():
+            for var in value:
+                feat_vars.append(var)
+        local_variance = sum(feat_vars)/len(feat_vars)
+        for class_id in global_protos.keys():
+            global_mean = global_protos[class_id]
+            combined_samples = global_mean.unsqueeze(0) + torch.randn(
+                self.num_of_feature, global_mean.size(0), device=self.device
+            ) * torch.sqrt(local_variance).unsqueeze(0)
+
+            features.append(combined_samples)
+            labels.append(torch.full((self.num_of_feature,), class_id, dtype=torch.long, device=self.device))
+        self.feature_syn = torch.cat(features, dim=0)
+        self.label_syn = torch.cat(labels, dim=0)
+        feature_syn_train_ft = copy.deepcopy(self.feature_syn.detach())
+        label_syn_train_ft = copy.deepcopy(self.label_syn.detach())
+        dst_train_syn_ft = TensorDataset(feature_syn_train_ft, label_syn_train_ft)
+        return dst_train_syn_ft
+
+    def feature_re_train(self, global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class):
+        # dst_train_syn_ft = self.update_feature_syn(self, global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class)
+        # dst_train_syn_ft = self.update_feature_syn2(self, global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class)
+
         ft_model = nn.Linear(512, self.num_classes).to(args.device)
         optimizer_ft_net = SGD(ft_model.parameters(), lr=args.lr_net)  # optimizer_img for synthetic data
         ft_model.train()
         for epoch in range(args.crt_epoch):
             optimizer_ft_net = exp_lr_scheduler(optimizer_ft_net, epoch, args.lr_net, lr_decay=30, decay_rate=0.1)
+
+            dst_train_syn_ft = self.update_feature_syn2(self, global_protos, global_vars, protos_data_by_class,
+                                                        vars_data_bv_class, nums_data_bv_class)
             trainloader_ft = DataLoader(dataset=dst_train_syn_ft,
                                         batch_size=self.batch_size_local_training,
                                         shuffle=True)
@@ -166,6 +195,8 @@ class Local(object):
                 images, labels = images.to(self.device), labels.to(self.device)
                 images = self.transform_train(images)
                 features, outputs = self.local_model(images)
+                if args.normal == True:
+                    features = torch.nn.functional.normalize(features, dim=1)
                 loss = self.criterion(outputs, labels)
 
 
@@ -193,6 +224,8 @@ def FedGAdp(args):
             match_epoch=args.match_epoch,
             crt_epoch=args.crt_epoch))
     clip_protos = torch.load("prototypes_"+args.dataset_name+".pth")
+    if args.normal == True:
+        clip_protos = torch.load("norm_prototypes_" + args.dataset_name + ".pth")
     random_state = np.random.RandomState(args.seed)
     # Load data
     list_client2indices, original_dict_per_client, data_global_test, indices2data = my_get_data(args)
@@ -202,7 +235,9 @@ def FedGAdp(args):
                           num_of_feature=args.num_of_feature)
     total_clients = list(range(args.num_clients))
     re_trained_acc = []
-    global_protos = None
+    global_protos = {}
+    for i in range(args.num_classes):
+        global_protos[i] = clip_protos[i]
     for r in tqdm(range(1, args.num_rounds+1), desc='server-training'):
         global_params = global_model.download_params()
         online_clients = random_state.choice(total_clients, args.num_online_clients, replace=False)
@@ -227,28 +262,35 @@ def FedGAdp(args):
             list_proto_nums_local_data.append(samples_T_num)
         # aggregating local models with FedAvg
         fedavg_params = global_model.initialize_for_model_fusion(list_dicts_local_params, list_nums_local_data)
-        global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class = compute_global_protos(list_proto_features_local_data,list_proto_vars_local_data,list_proto_nums_local_data, True)
+
+        one_re_train_acc = global_model.global_eval(fedavg_params, data_global_test, args.batch_size_test)
+        print(r, one_re_train_acc)
+
+
+        round_global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class = compute_global_protos(list_proto_features_local_data,list_proto_vars_local_data,list_proto_nums_local_data, True)
 
         ratio = (r-1)/args.num_rounds
         for i in range(args.num_classes):
-            global_protos[i] = global_protos[i]*ratio+clip_protos[i]*(1-ratio)
+            if i not in round_global_protos.keys():
+                # global_protos[i] = clip_protos[i]
+                continue
+            else:
+                global_protos[i] = round_global_protos[i]*ratio+clip_protos[i]*(1-ratio)
 
-        global_model.update_feature_syn(global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class)
         # global eval
-        feature_net_params = global_model.feature_re_train()
+        feature_net_params = global_model.feature_re_train(global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class)
         for name_param in reversed(fedavg_params):
             if name_param == 'classifier.bias':
                 fedavg_params[name_param] = feature_net_params['bias']
             if name_param == 'classifier.weight':
                 fedavg_params[name_param] = feature_net_params['weight']
         one_re_train_acc = global_model.global_eval(fedavg_params, data_global_test, args.batch_size_test)
+        print(r, one_re_train_acc)
         re_trained_acc.append(one_re_train_acc)
         global_model.syn_model.load_state_dict(copy.deepcopy(fedavg_params))
-        if r % 10 == 0:
-            print(re_trained_acc)
-    with open("{}_{}_FedGAdp.txt".format(args.dataset_name, int(1.0/args.imb_factor)),"w") as f:
-        for i, acc in enumerate(re_trained_acc):
-            f.write("epoch_"+str(i)+":"+str(acc)+"\n")
+        with open("{}_{}_FedSimP.txt".format(args.dataset_name, int(1.0/args.imb_factor)),"w") as f:
+            for i, acc in enumerate(re_trained_acc):
+                f.write("epoch_"+str(i)+":"+str(acc)+"\n")
     print(re_trained_acc)
 
 
