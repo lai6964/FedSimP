@@ -19,7 +19,7 @@ import random
 import torch.nn as nn
 import time
 from Dataset.param_aug import DiffAugment
-from utils import compute_global_protos, _get_prototypes_by_labels, compute_mean_and_variance, cluster_protos_by_Truepredict, compute_global_protos, get_protos
+from utils import compute_global_protos, _get_prototypes_by_labels, compute_mean_and_variance, cluster_protos_by_Truepredict, compute_global_protos, get_protos, exp_lr_scheduler
 from collections import defaultdict
 from utils_getdata import my_get_data
 
@@ -70,15 +70,19 @@ class Global(object):
             for i,n in enumerate(nums):
                 local_mean = protos_data_by_class[class_id][i]
                 local_variance = vars_data_bv_class[class_id][i]
-                local_samples = local_mean.unsqueeze(0) + torch.randn(
-                    n, local_mean.size(0), device=self.device
+                # local_samples = local_mean.unsqueeze(0) + torch.randn(
+                #     n, local_mean.size(0), device=self.device
+                # ) * torch.sqrt(local_variance).unsqueeze(0)
+                #
+                # global_samples = global_mean.unsqueeze(0) + torch.randn(
+                #     n, global_mean.size(0), device=self.device
+                # ) * torch.sqrt(global_variance).unsqueeze(0)
+                # combined_samples = 0.5 * local_samples + 0.5 * global_samples
+
+                combined_samples = global_mean.unsqueeze(0) + torch.randn(
+                    n, global_mean.size(0), device=self.device
                 ) * torch.sqrt(local_variance).unsqueeze(0)
 
-                global_samples = global_mean.unsqueeze(0) + torch.randn(
-                    n, global_mean.size(0), device=self.device
-                ) * torch.sqrt(global_variance).unsqueeze(0)
-
-                combined_samples = 0.5 * local_samples + 0.5 * global_samples
                 features.append(combined_samples)
                 labels.append(torch.full((n,), class_id, dtype=torch.long, device=self.device))
         self.feature_syn = torch.cat(features, dim=0)
@@ -93,6 +97,7 @@ class Global(object):
         optimizer_ft_net = SGD(ft_model.parameters(), lr=args.lr_net)  # optimizer_img for synthetic data
         ft_model.train()
         for epoch in range(args.crt_epoch):
+            optimizer_ft_net = exp_lr_scheduler(optimizer_ft_net, epoch, args.lr_net, lr_decay=30, decay_rate=0.1)
             trainloader_ft = DataLoader(dataset=dst_train_syn_ft,
                                         batch_size=self.batch_size_local_training,
                                         shuffle=True)
