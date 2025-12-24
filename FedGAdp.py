@@ -19,10 +19,10 @@ import random
 import torch.nn as nn
 import time
 from Dataset.param_aug import DiffAugment
-from utils import compute_global_protos, _get_prototypes_by_labels, compute_mean_and_variance, cluster_protos_by_Truepredict, compute_global_protos, get_protos
+from utils import compute_global_protos, _get_prototypes_by_labels, compute_mean_and_variance, cluster_protos_by_Truepredict, compute_global_protos, get_protos, exp_lr_scheduler
 from collections import defaultdict
 from utils_getdata import my_get_data
-
+import sys
 
 class Global(object):
     def __init__(self,
@@ -93,6 +93,7 @@ class Global(object):
         optimizer_ft_net = SGD(ft_model.parameters(), lr=args.lr_net)  # optimizer_img for synthetic data
         ft_model.train()
         for epoch in range(args.crt_epoch):
+            optimizer_ft_net = exp_lr_scheduler(optimizer_ft_net, epoch, args.lr_net, lr_decay=30, decay_rate=0.1)
             trainloader_ft = DataLoader(dataset=dst_train_syn_ft,
                                         batch_size=self.batch_size_local_training,
                                         shuffle=True)
@@ -161,6 +162,8 @@ class Local(object):
                 images, labels = images.to(self.device), labels.to(self.device)
                 images = self.transform_train(images)
                 features, outputs = self.local_model(images)
+                if args.normal == True:
+                    features = torch.nn.functional.normalize(features, dim=1)
                 loss = self.criterion(outputs, labels)
 
 
@@ -188,6 +191,8 @@ def FedGAdp(args):
             match_epoch=args.match_epoch,
             crt_epoch=args.crt_epoch))
     clip_protos = torch.load("prototypes_"+args.dataset_name+".pth")
+    if args.normal == True:
+        clip_protos = torch.load("norm_prototypes_" + args.dataset_name + ".pth")
     random_state = np.random.RandomState(args.seed)
     # Load data
     list_client2indices, original_dict_per_client, data_global_test, indices2data = my_get_data(args)
@@ -239,9 +244,12 @@ def FedGAdp(args):
         one_re_train_acc = global_model.global_eval(fedavg_params, data_global_test, args.batch_size_test)
         re_trained_acc.append(one_re_train_acc)
         global_model.syn_model.load_state_dict(copy.deepcopy(fedavg_params))
-        if r % 10 == 0:
-            print(re_trained_acc)
-    with open("{}_{}_FedGAdp.txt".format(args.dataset_name, int(1.0/args.imb_factor)),"w") as f:
+        print(r, one_re_train_acc)
+        sys.stdout.flush()
+    filetxt = "{}_{}_FedGAdp.txt".format(args.dataset_name, int(1.0/args.imb_factor))
+    if args.normal == True:
+        filetxt = filetxt[:-4]+"norm.txt"
+    with open(filetxt,"w") as f:
         for i, acc in enumerate(re_trained_acc):
             f.write("epoch_"+str(i)+":"+str(acc)+"\n")
     print(re_trained_acc)

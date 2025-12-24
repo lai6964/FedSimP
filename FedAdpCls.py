@@ -161,6 +161,8 @@ class Local(object):
                 images, labels = images.to(self.device), labels.to(self.device)
                 images = self.transform_train(images)
                 features, outputs = self.local_model(images)
+                if args.normal == True:
+                    features = torch.nn.functional.normalize(features, dim=1)
                 loss = self.criterion(outputs, labels)
 
 
@@ -235,7 +237,11 @@ def FedAdpCls(args):
         global_model.syn_model.load_state_dict(copy.deepcopy(fedavg_params))
         if r % 10 == 0:
             print(re_trained_acc)
-    with open("results/{}_{}_FedAdpCls.txt".format(args.dataset_name, int(1.0/args.imb_factor)),"w") as f:
+
+    filetxt = "{}_{}_FedAdpCls.txt".format(args.dataset_name, int(1.0/args.imb_factor))
+    if args.normal == True:
+        filetxt = filetxt[:-4]+"norm.txt"
+    with open(filetxt,"w") as f:
         for i, acc in enumerate(re_trained_acc):
             f.write("epoch_"+str(i)+":"+str(acc)+"\n")
     print(re_trained_acc)

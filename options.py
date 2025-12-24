@@ -53,5 +53,6 @@ def args_parser():
     elif args.dataset_name == "Cifar100":
         args.num_classes = 100
 
-    args.num_online_clients = args.num_clients
+    # args.num_online_clients = args.num_clients
+    args.normal = True
     return args
