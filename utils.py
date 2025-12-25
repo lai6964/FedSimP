@@ -155,7 +155,7 @@ def compute_global_protos(uploaded_protos, uploaded_vars, uploaded_nums, outbycl
         return global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class
     return global_protos, global_vars
 
-def exp_lr_scheduler(optimizer, epoch, init_lr, lr_decay, decay_rate):
+def exp_lr_scheduler(optimizer, epoch, init_lr, lr_decay=40, decay_rate=0.1):
     """Decay learning rate by a factor of 0.1 every lr_decay_epoch epochs."""
     # 每四次epoch调整一下lr，将lr减半
     lr = init_lr * (decay_rate ** (epoch // lr_decay))  # *是乘法，**是乘方，/是浮点除法，//是整数除法，%是取余数

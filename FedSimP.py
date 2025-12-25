@@ -116,16 +116,16 @@ class Global(object):
         return dst_train_syn_ft
 
     def feature_re_train(self, global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class):
-        # dst_train_syn_ft = self.update_feature_syn(self, global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class)
-        # dst_train_syn_ft = self.update_feature_syn2(self, global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class)
+        # dst_train_syn_ft = self.update_feature_syn(global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class)
+        # dst_train_syn_ft = self.update_feature_syn2(global_protos, global_vars, protos_data_by_class, vars_data_bv_class, nums_data_bv_class)
 
         ft_model = nn.Linear(512, self.num_classes).to(args.device)
         optimizer_ft_net = SGD(ft_model.parameters(), lr=args.lr_net)  # optimizer_img for synthetic data
         ft_model.train()
         for epoch in range(args.crt_epoch):
-            optimizer_ft_net = exp_lr_scheduler(optimizer_ft_net, epoch, args.lr_net, lr_decay=30, decay_rate=0.1)
+            optimizer_ft_net = exp_lr_scheduler(optimizer_ft_net, epoch, args.lr_net)
 
-            dst_train_syn_ft = self.update_feature_syn2(self, global_protos, global_vars, protos_data_by_class,
+            dst_train_syn_ft = self.update_feature_syn2(global_protos, global_vars, protos_data_by_class,
                                                         vars_data_bv_class, nums_data_bv_class)
             trainloader_ft = DataLoader(dataset=dst_train_syn_ft,
                                         batch_size=self.batch_size_local_training,
@@ -186,6 +186,14 @@ class Local(object):
 
         self.local_model.load_state_dict(global_params)
         self.local_model.train()
+
+        for p in self.local_model.classifier.parameters():
+            p.requires_grad = False
+        self.optimizer = torch.optim.SGD(
+            filter(lambda p: p.requires_grad, self.local_model.parameters()),
+            lr=0.1, momentum=0.9, weight_decay=5e-4
+        )
+
         for _ in range(args.num_epochs_local_training):
             data_loader = DataLoader(dataset=self.data_client,
                                      batch_size=args.batch_size_local_training,
@@ -288,7 +296,7 @@ def FedGAdp(args):
         print(r, one_re_train_acc)
         re_trained_acc.append(one_re_train_acc)
         global_model.syn_model.load_state_dict(copy.deepcopy(fedavg_params))
-        with open("{}_{}_FedSimP.txt".format(args.dataset_name, int(1.0/args.imb_factor)),"w") as f:
+        with open("{}_{}_FedSimP_random.txt".format(args.dataset_name, int(1.0/args.imb_factor)),"w") as f:
             for i, acc in enumerate(re_trained_acc):
                 f.write("epoch_"+str(i)+":"+str(acc)+"\n")
     print(re_trained_acc)

@@ -20,7 +20,7 @@ def args_parser():
     parser.add_argument('--batch_real', type=int, default=32)
     parser.add_argument('--num_of_feature', type=int, default=100)
     parser.add_argument('--lr_feature', type=float, default=0.1, help='learning rate for updating synthetic images')
-    parser.add_argument('--lr_net', type=float, default=0.01, help='learning rate for updating network parameters')
+    parser.add_argument('--lr_net', type=float, default=0.1, help='learning rate for updating network parameters')
     parser.add_argument('--batch_size_test', type=int, default=500)
     parser.add_argument('--lr_local_training', type=float, default=0.1)
     parser.add_argument('--device', type=str, default='cuda')
